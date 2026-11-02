@@ -25,7 +25,9 @@ def register(mcp: FastMCP, client_factory: Callable[[], str | None]) -> None:
         """List all folders visible to this vault's bound configuration."""
         try:
             client = keeper_client.build_client(client_factory())
-            raw_folders = keeper_client.call_with_retry(client.get_folders, op="get_folders")
+            raw_folders = await keeper_client.call_with_retry(
+                client.get_folders, op="get_folders"
+            )
             folders = [
                 {
                     "uid": f.uid,

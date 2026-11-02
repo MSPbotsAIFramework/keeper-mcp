@@ -70,7 +70,9 @@ def register(mcp: FastMCP, client_factory: Callable[[], str | None]) -> None:
             capped_limit = max(1, min(limit, MAX_LIMIT))
             capped_offset = max(0, offset)
             client = keeper_client.build_client(client_factory())
-            records = keeper_client.call_with_retry(client.get_secrets, op="get_secrets")
+            records = await keeper_client.call_with_retry(
+                client.get_secrets, op="get_secrets"
+            )
 
             if folder_uid:
                 records = [r for r in records if r.folder_uid == folder_uid]
@@ -98,7 +100,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], str | None]) -> None:
         (unknown, or belongs to a different vault)."""
         try:
             client = keeper_client.build_client(client_factory())
-            records = keeper_client.call_with_retry(
+            records = await keeper_client.call_with_retry(
                 lambda: client.get_secrets(uids=[uid]), op="get_secrets"
             )
             if not records:
@@ -125,7 +127,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], str | None]) -> None:
         try:
             client = keeper_client.build_client(client_factory())
             try:
-                value = keeper_client.call_with_retry(
+                value = await keeper_client.call_with_retry(
                     lambda: client.get_notation(notation), op="get_notation"
                 )
             except ValueError as exc:
@@ -164,7 +166,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], str | None]) -> None:
             record.fields = record_fields
 
             client = keeper_client.build_client(client_factory())
-            new_uid = keeper_client.call_with_retry(
+            new_uid = await keeper_client.call_with_retry(
                 lambda: client.create_secret(folder_uid, record), op="create_secret"
             )
             return json.dumps({"uid": new_uid}, separators=(",", ":"), ensure_ascii=False)
@@ -189,7 +191,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], str | None]) -> None:
                     )
 
             client = keeper_client.build_client(client_factory())
-            records = keeper_client.call_with_retry(
+            records = await keeper_client.call_with_retry(
                 lambda: client.get_secrets(uids=[uid]), op="get_secrets"
             )
             if not records:
@@ -208,7 +210,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], str | None]) -> None:
                     existing_fields.append({"type": field_type, "value": value_list})
             record._update()  # noqa: SLF001 -- same pattern the SDK's own setters use
 
-            keeper_client.call_with_retry(lambda: client.save(record), op="save")
+            await keeper_client.call_with_retry(lambda: client.save(record), op="save")
             result = {"uid": uid, "updated_fields": list(fields.keys())}
             return json.dumps(result, separators=(",", ":"), ensure_ascii=False)
         except ToolError as exc:
@@ -227,7 +229,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], str | None]) -> None:
                 raise ToolError("invalid_argument", "uids: must contain at least one UID")
 
             client = keeper_client.build_client(client_factory())
-            response = keeper_client.call_with_retry(
+            response = await keeper_client.call_with_retry(
                 lambda: client.delete_secret(uids), op="delete_secret"
             )
 

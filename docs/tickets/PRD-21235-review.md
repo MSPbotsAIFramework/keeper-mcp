@@ -59,3 +59,57 @@ Verdict: changes requested
    rule, but worth wiring up or removing.
 
 ### Fixes            ← appended by the dev leg on rework
+
+## Round 1 fixes · 2026-11-02 · dev leg rework on dev/PRD-21235
+
+1. **[must-fix #1 fixed]** `docs/tickets/PRD-21235.md:211` — rephrased the Self-test table's
+   Chinese-text-scan row to describe the design-leg fragments it replaced in English prose
+   (pointing at the commit 310c681 diff for the exact before/after) instead of quoting the
+   literal CJK characters. Re-ran the exact documented scan on the new commit:
+   `grep -rnP '[\x{4e00}-\x{9fff}]' --exclude-dir=.git --exclude-dir=.venv .` now has zero hits
+   outside this review record (this file still quotes the SOP text and the old fragments as
+   evidence of the finding itself, which is this file's job, not the deliverable's).
+   Side note for transparency: a first draft of fix #2 below accidentally introduced a *new*
+   Chinese-language source comment in `keeper_client.py` (quoting the SOP §14 checklist line
+   in Chinese); caught by re-running this same scan before finalizing and rephrased in English.
+   Flagging it here because it's exactly the kind of self-introduced regression this must-fix
+   is about, and I don't want "I fixed must-fix #1" to read as more thorough than it was on
+   the first pass.
+
+2. **[must-fix #2 fixed]** `src/keeper_mcp/keeper_client.py`:
+   - Patched `requests.post` at module import time (the vendor SDK calls it as a bare module
+     function, not through a `Session`, so this was the only lever available without forking
+     the SDK) to inject a default `timeout=(5, 20)` (connect, read) whenever the caller didn't
+     already pass one. Verified live: `requests.post('http://10.255.255.1/', ...)` (a
+     non-routable address) now raises `ConnectTimeout` after 5.01s instead of hanging — see
+     command output in Handoff of the dev-leg commit.
+   - `call_with_retry` is now `async def` and runs the blocking SDK call via
+     `asyncio.to_thread(fn)` instead of calling `fn()` directly on the event loop; the retry
+     backoff uses `await asyncio.sleep(delay)` instead of `time.sleep(delay)`. All 8 call sites
+     in `tools/secrets.py` and `tools/folders.py` updated to `await` it.
+   - Budget check: worst case 3 attempts × 20s read timeout + backoff (1s + 2s) ≈ 63s, still
+     under the 120s per-call invariant stated in the file's own comment.
+   - New regression test `tests/test_tools.py::
+     test_call_with_retry_offloads_blocking_call_so_event_loop_stays_responsive` runs a
+     thread-blocking 200ms call concurrently with a second coroutine advancing only via
+     `asyncio.sleep`, and asserts total wall time stays under 0.35s (concurrent) rather than
+     ~0.4s (serialized, what the pre-fix code measured at when manually reverted to `return
+     fn()` while writing this test). This closes the exact gap the review called out in TC9
+     (contextvar isolation under instant mocked calls does not exercise a real blocking call).
+   - Existing TC10 tests (`test_upstream_rate_limit_is_retried_then_mapped_to_structured_error`,
+     `test_persistent_network_error_maps_to_upstream_error_after_max_retries`) updated to
+     `async def` / `await`, monkeypatching `keeper_client.asyncio.sleep` instead of
+     `keeper_client.time.sleep`; same assertions, same pass/fail behavior.
+
+3. **[suggestion, not addressed]** `tools/secrets.py:24` `MAX_RESULT_CHARS` dead constant —
+   left as-is this round; it's explicitly non-blocking per REVIEW.md's dead-code rule and out
+   of scope for a must-fix-only rework.
+
+Gates re-run on this commit (synced with `main` @ 03543c6, unchanged since round 1):
+`uv run pytest -v` 21 passed (20 + 1 new) / 0 failed; `uv run ruff check .` all checks passed;
+Chinese-text scan clean (see above); `gitleaks detect` clean on working tree and on the
+6-commit git history; `docker build` succeeded; container smoke test: `/health` → `200
+{"status":"ok"}`; `/mcp tools/list` with no header → `401 Missing required header:
+X-Keeper-Config`; `/mcp initialize` then `tools/list` with a placeholder `X-Keeper-Config`
+header → both `200`, 7-tool list, confirming `stateless_http=True` still holds (no prior
+`initialize` required for `tools/list` either, re-checked directly).

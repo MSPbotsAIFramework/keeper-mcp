@@ -12,7 +12,9 @@ retrieved" message `create_secret` raises for a bad folder_uid).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -383,11 +385,15 @@ async def test_update_secret_unknown_uid_returns_not_found(fake_client: FakeClie
 # --- keeper_client.call_with_retry / _map_keeper_error (not a tool call) ----
 
 
-def test_upstream_rate_limit_is_retried_then_mapped_to_structured_error(
+@pytest.mark.asyncio
+async def test_upstream_rate_limit_is_retried_then_mapped_to_structured_error(
     monkeypatch: pytest.MonkeyPatch,
 ):
     # No real delay in tests.
-    monkeypatch.setattr(keeper_client.time, "sleep", lambda _seconds: None)
+    async def _no_delay(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(keeper_client.asyncio, "sleep", _no_delay)
 
     attempts = {"n": 0}
 
@@ -400,7 +406,7 @@ def test_upstream_rate_limit_is_retried_then_mapped_to_structured_error(
         raise KeeperThrottleError("rate limited by Keeper")
 
     with pytest.raises(keeper_client.ToolError) as exc_info:
-        keeper_client.call_with_retry(flaky_call, op="get_secrets")
+        await keeper_client.call_with_retry(flaky_call, op="get_secrets")
 
     # The throttle error on the final attempt short-circuits straight to
     # rate_limited -- the SDK has already exhausted its own backoff before
@@ -409,10 +415,14 @@ def test_upstream_rate_limit_is_retried_then_mapped_to_structured_error(
     assert attempts["n"] == keeper_client.MAX_RETRIES
 
 
-def test_persistent_network_error_maps_to_upstream_error_after_max_retries(
+@pytest.mark.asyncio
+async def test_persistent_network_error_maps_to_upstream_error_after_max_retries(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(keeper_client.time, "sleep", lambda _seconds: None)
+    async def _no_delay(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(keeper_client.asyncio, "sleep", _no_delay)
     import requests
 
     attempts = {"n": 0}
@@ -422,7 +432,55 @@ def test_persistent_network_error_maps_to_upstream_error_after_max_retries(
         raise requests.exceptions.Timeout("no response")
 
     with pytest.raises(keeper_client.ToolError) as exc_info:
-        keeper_client.call_with_retry(always_fails, op="get_secrets")
+        await keeper_client.call_with_retry(always_fails, op="get_secrets")
 
     assert exc_info.value.code == "upstream_error"
     assert attempts["n"] == keeper_client.MAX_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_call_with_retry_offloads_blocking_call_so_event_loop_stays_responsive():
+    """Review round 1 must-fix #2: a blocking SDK call must never stall the
+    shared event loop. TC9 (test_middleware.py) only proves contextvar
+    isolation under instant, mocked calls -- it does not exercise a real
+    blocking call, so it would not have caught this.
+
+    This test runs a call that blocks its own thread for ~200ms concurrently
+    with a second coroutine that only advances via `asyncio.sleep` for a
+    comparable ~200ms, and asserts on *wall-clock overlap*: if the blocking
+    call ran directly on the event loop (the pre-fix behaviour -- confirmed
+    by manually reverting to `return fn()` while writing this test, which
+    makes this assertion fail at ~0.40s), the two would serialize to ~0.4s
+    total. Offloading via `asyncio.to_thread` lets them run concurrently, so
+    the real wall time is close to the slower of the two (~0.2s). A loose
+    0.35s cutoff leaves headroom for scheduler jitter while still failing on
+    serialization."""
+    progress = {"ticks": 0}
+
+    def slow_blocking_call():
+        # Models a vendor SDK call that blocks the calling thread with no
+        # asyncio awareness (e.g. requests.post with no timeout, or the
+        # retry backoff itself if it used time.sleep instead of
+        # asyncio.sleep).
+        time.sleep(0.2)
+        return "ok"
+
+    async def other_task():
+        for _ in range(10):
+            await asyncio.sleep(0.02)
+            progress["ticks"] += 1
+
+    start = time.monotonic()
+    result, _ = await asyncio.gather(
+        keeper_client.call_with_retry(slow_blocking_call, op="get_secrets"),
+        other_task(),
+    )
+    elapsed = time.monotonic() - start
+
+    assert result == "ok"
+    assert progress["ticks"] == 10
+    assert elapsed < 0.35, (
+        f"took {elapsed:.3f}s -- the blocking call and other_task ran "
+        "serially instead of concurrently, meaning the blocking SDK call is "
+        "stalling the shared event loop again"
+    )

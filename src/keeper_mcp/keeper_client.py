@@ -8,8 +8,8 @@ processes (docs/tickets/PRD-21235.md, "Configuration stability"), so no
 locking or caching is needed here -- see Non-functional in that doc.
 """
 
+import asyncio
 import logging
-import time
 from collections.abc import Callable
 
 import requests
@@ -25,6 +25,32 @@ logger = logging.getLogger("keeper_mcp")
 # including retries, must stay well under the 120s upstream timeout).
 MAX_RETRIES = 3
 BASE_DELAY_SEC = 1.0
+
+# Outbound (connect, read) timeout applied to every Keeper API call (SOP §14
+# Checklist requires setting an outbound connect/read timeout). The vendor SDK
+# (keeper-secrets-manager-core==17.3.0) calls `requests.post(...)` directly
+# with no `timeout=` kwarg and exposes no parameter to set one (confirmed
+# against the installed package's core.py: `SecretsManager.post_function`,
+# `__upload_file_function`) -- `requests` otherwise waits indefinitely on a
+# stalled connection. Worst case with MAX_RETRIES=3: 3 * 20s read timeout +
+# backoff (1s + 2s) = ~63s, comfortably under the 120s per-call budget below.
+_OUTBOUND_TIMEOUT_SEC = (5, 20)  # (connect, read)
+
+_original_requests_post = requests.post
+
+
+def _post_with_default_timeout(*args: object, **kwargs: object) -> requests.Response:
+    """Wrap `requests.post` to inject a default timeout when the caller
+    didn't pass one. Patched process-wide at import time because the vendor
+    SDK calls the module-level function directly rather than through a
+    `requests.Session` we could configure ourselves."""
+    kwargs.setdefault("timeout", _OUTBOUND_TIMEOUT_SEC)
+    return _original_requests_post(*args, **kwargs)
+
+
+if not getattr(requests.post, "_keeper_mcp_patched", False):
+    _post_with_default_timeout._keeper_mcp_patched = True  # type: ignore[attr-defined]
+    requests.post = _post_with_default_timeout
 
 
 def build_client(config_b64: str | None) -> SecretsManager:
@@ -50,12 +76,19 @@ def build_client(config_b64: str | None) -> SecretsManager:
         ) from exc
 
 
-def call_with_retry[T](fn: Callable[[], T], *, op: str) -> T:
+async def call_with_retry[T](fn: Callable[[], T], *, op: str) -> T:
     """Run a Keeper SDK call, retrying transient upstream failures (AC8).
 
+    `fn` is a blocking call into the vendor SDK (it ultimately calls
+    `requests.post` synchronously). It is run via `asyncio.to_thread` so a
+    slow or stalled upstream connection only blocks the worker thread
+    handling this one request, never the shared event loop that every other
+    tenant's concurrent `/mcp` request also runs on.
+
     - requests.exceptions.Timeout / ConnectionError (network-level): retried
-      with exponential backoff up to MAX_RETRIES, then mapped to
-      upstream_error (retryable=true) if still failing.
+      with exponential backoff (`asyncio.sleep`, also non-blocking) up to
+      MAX_RETRIES, then mapped to upstream_error (retryable=true) if still
+      failing.
     - KeeperThrottleError: the SDK has already exhausted its own internal
       403-throttle retry loop (exponential backoff + jitter, see vendor SDK
       core.py) before raising this -- mapped straight to rate_limited
@@ -68,7 +101,7 @@ def call_with_retry[T](fn: Callable[[], T], *, op: str) -> T:
     last_exc: Exception | None = None
     for attempt in range(MAX_RETRIES):
         try:
-            return fn()
+            return await asyncio.to_thread(fn)
         except KeeperThrottleError as exc:
             raise ToolError("rate_limited", str(exc)) from exc
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
@@ -83,7 +116,7 @@ def call_with_retry[T](fn: Callable[[], T], *, op: str) -> T:
                     exc.__class__.__name__,
                     delay,
                 )
-                time.sleep(delay)
+                await asyncio.sleep(delay)
                 continue
             break
         except KeeperError as exc:
