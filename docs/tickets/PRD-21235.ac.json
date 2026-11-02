@@ -1,0 +1,123 @@
+[
+  {
+    "id": "TC1",
+    "ac": "AC1",
+    "text": "Given a tenant has a valid bound KSM config in X-Keeper-Config, When the agent calls keeper_list_secrets with more records than the default limit, Then the tool returns at most limit (default 50, hard cap 200) secrets and has_more is true",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_list_secrets_caps_at_limit_and_sets_has_more"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_list_secrets_caps_at_limit_and_sets_has_more -v -> PASSED (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC2",
+    "ac": "AC2",
+    "text": "Given a request omits the X-Keeper-Config header, When any tool is called, Then the service returns 401 with the required_headers list and makes no outbound call to Keeper",
+    "type": "auto",
+    "tests": ["tests/test_middleware.py::test_missing_credential_header_returns_401_without_calling_keeper"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_middleware.py::test_missing_credential_header_returns_401_without_calling_keeper -v -> PASSED; also confirmed live: curl -i -X POST http://localhost:18180/mcp (no header) -> 401 {\"error\":\"Missing credentials\",\"required_headers\":[\"X-Keeper-Config\"]} (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC3",
+    "ac": "AC3",
+    "text": "Given a valid config and a record UID that exists, When the agent calls keeper_get_secret, Then the tool returns that record's type, title, and full field list",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_get_secret_returns_full_field_list"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_get_secret_returns_full_field_list -v -> PASSED (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC4",
+    "ac": "AC4",
+    "text": "Given a record UID the bound config cannot see (unknown or belongs to a different vault), When the agent calls keeper_get_secret, Then the tool returns the structured not_found error, not a 500 and not an empty success",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_get_secret_unknown_uid_returns_not_found_error"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_get_secret_unknown_uid_returns_not_found_error -v -> PASSED (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC5",
+    "ac": "AC5",
+    "text": "Given a valid folder_uid and field values, When the agent calls keeper_create_secret, Then a new record is created and its uid is returned",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_create_secret_returns_new_uid"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_create_secret_returns_new_uid -v -> PASSED (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC6",
+    "ac": "AC5",
+    "text": "Given a folder_uid that does not exist, When the agent calls keeper_create_secret, Then the tool returns invalid_argument naming the bad field, not a generic error",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_create_secret_invalid_folder_returns_invalid_argument"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_create_secret_invalid_folder_returns_invalid_argument -v -> PASSED; exercises the real (non-mocked) keeper_client.call_with_retry/_map_keeper_error against the installed keeper-secrets-manager-core==17.3.0's exact \"Folder uid=... was not retrieved\" error string (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC7",
+    "ac": "AC6",
+    "text": "Given a list of explicit existing record UIDs, When the agent calls keeper_delete_secret, Then exactly those records are deleted and the tool reports the deleted count",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_delete_secret_removes_only_named_uids"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_delete_secret_removes_only_named_uids -v -> PASSED (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC8",
+    "ac": "AC6",
+    "text": "Given the keeper_delete_secret tool schema, When inspected, Then it has no folder-wide or vault-wide bulk-delete parameter -- only an explicit uids list is accepted",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_delete_secret_schema_has_no_bulk_or_folder_wide_param"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_delete_secret_schema_has_no_bulk_or_folder_wide_param -v -> PASSED; also confirmed live via tools/list over HTTP: keeper_delete_secret.inputSchema.properties == {\"uids\"} (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC9",
+    "ac": "AC7",
+    "text": "Given two concurrent requests carrying two different X-Keeper-Config values, When both are processed by the same running instance, Then neither request's credentials or results are visible to the other",
+    "type": "auto",
+    "tests": ["tests/test_middleware.py::test_concurrent_requests_do_not_leak_credentials_or_results"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_middleware.py::test_concurrent_requests_do_not_leak_credentials_or_results -v -> PASSED (asyncio.gather of two requests with asyncio.sleep(0) interleaving, each only ever observes its own contextvar value) (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC10",
+    "ac": "AC8",
+    "text": "Given the upstream Keeper API returns a transient rate-limit or 5xx response, When a tool call is in flight, Then the service retries with backoff within the per-call timeout budget and, if still failing, returns a structured rate_limited or upstream_error envelope instead of raising",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_upstream_rate_limit_is_retried_then_mapped_to_structured_error"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_upstream_rate_limit_is_retried_then_mapped_to_structured_error tests/test_tools.py::test_persistent_network_error_maps_to_upstream_error_after_max_retries -v -> both PASSED (2026-11-02, commit 126bda1)"
+  },
+  {
+    "id": "TC11",
+    "ac": "AC9",
+    "text": "Given two bound configs from two different real Keeper accounts, When each is used to call keeper_list_secrets / keeper_get_secret, Then each only ever sees its own account's records and folders -- never the other's",
+    "type": "manual",
+    "steps": [
+      "Obtain two bound KSM configs from two separate real Keeper Secrets Manager accounts (needs a real vendor account; cannot be faked -- Keeper's account/vault separation is enforced server-side)",
+      "Call keeper_list_secrets and keeper_get_secret with config A, record the returned UIDs/titles",
+      "Call the same tools with config B, record the returned UIDs/titles",
+      "Diff the two result sets"
+    ],
+    "expect": "The two result sets never overlap except by true coincidence of UID values (which KSM UIDs do not collide on in practice); config A never returns a record/folder that only exists in account B's vault and vice versa",
+    "result": "untested",
+    "evidence": "Not executed: no real Keeper Secrets Manager account/vault was available to this pipeline at build time (2026-11-02). Not a delivery blocker per vendor-mcp-development SOP (\"no test account is not a blocker\"). Isolation at the code level (TC9) is covered and passing; this case needs a real second data source to confirm end to end."
+  },
+  {
+    "id": "TC12",
+    "ac": "AC1,AC3,AC5,AC6",
+    "text": "Given a real bound KSM config produced by redeeming a one-time token once outside this service, When the agent runs create -> get -> update -> delete on a scratch secret end to end, Then every step succeeds against the live Keeper cloud API, confirming the bound config actually authenticates in production conditions",
+    "type": "manual",
+    "steps": [
+      "In a real Keeper Vault, create an Application + Client Device, generate a One-Time Access Token, and redeem it once via Keeper's own tooling (e.g. Keeper Commander or the SDK's bootstrap) to obtain the bound config",
+      "Base64-encode the resulting configuration and send it as X-Keeper-Config on tools/call keeper_create_secret to create a scratch login record in a test folder",
+      "Call keeper_get_secret with the returned uid and confirm the fields match what was created",
+      "Call keeper_update_secret to change one field, then keeper_get_secret again to confirm the change",
+      "Call keeper_delete_secret with that uid and confirm it is gone from a subsequent keeper_list_secrets"
+    ],
+    "expect": "Every step returns a successful tool result; no step requires redeeming a second one-time token (confirming the bound config, not the token, is what is reused per call)",
+    "result": "untested",
+    "evidence": "Not executed: no real Keeper Secrets Manager account/vault was available to this pipeline at build time (2026-11-02). Not a delivery blocker per vendor-mcp-development SOP. Each step's logic is covered individually by TC3/TC5/TC6/TC7 (mocked SDK); this case needs a live vault to confirm the sequence end to end against the real Keeper cloud API."
+  }
+]
