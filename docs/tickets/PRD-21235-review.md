@@ -1,5 +1,7 @@
 # PRD-21235 · Code review
 
+Status: frozen @ 3eabfbd
+
 ## Round 1 · 2026-11-02 · reviewed dev/PRD-21235 @ 310c681 (base main @ 03543c6)
 
 Verdict: changes requested
@@ -113,3 +115,64 @@ Chinese-text scan clean (see above); `gitleaks detect` clean on working tree and
 X-Keeper-Config`; `/mcp initialize` then `tools/list` with a placeholder `X-Keeper-Config`
 header → both `200`, 7-tool list, confirming `stateless_http=True` still holds (no prior
 `initialize` required for `tools/list` either, re-checked directly).
+
+## Round 2 · 2026-11-02 · reviewed dev/PRD-21235 @ 3eabfbd (base main @ 03543c6)
+
+Verdict: approved
+
+### Round 1 must-fixes re-checked
+
+1. **Must-fix #1 (Chinese text in the frozen Self-test row) — confirmed fixed.**
+   `docs/tickets/PRD-21235.md:211` now describes the design-leg fix in English prose and
+   points at the 310c681 diff instead of quoting the old CJK fragments. Re-ran the exact
+   documented scan on this commit: `grep -rnP '[\x{4e00}-\x{9fff}]' --exclude-dir=.git
+   --exclude-dir=.venv .` — the only hits left are inside this review record
+   (`docs/tickets/PRD-21235-review.md`), quoting the original defect and the SOP checklist
+   text as evidence of what Round 1 found and fixed. That is the review record's own job
+   (documenting a finding necessarily means quoting it), not a regression of the deliverable
+   — `src/`, `README.md`, and `docs/tickets/PRD-21235.md` are all clean. Not reopening.
+
+2. **Must-fix #2 (no outbound timeout, blocking SDK calls on the event loop) — confirmed
+   fixed.** Read the full diff `310c681..3eabfbd` for `keeper_client.py`,
+   `tools/secrets.py`, `tools/folders.py`:
+   - `requests.post` is wrapped at import time (`keeper_client.py:39-53`) to inject
+     `timeout=(5, 20)` whenever the caller (the vendor SDK) didn't already pass one, guarded
+     against double-patching (`_keeper_mcp_patched`). This is the only lever available since
+     the SDK calls the module-level function directly, not through a `Session` — confirmed
+     against the same `keeper-secrets-manager-core==17.3.0` source cited in Round 1.
+   - `call_with_retry` is now `async def` and awaits `asyncio.to_thread(fn)` instead of
+     calling `fn()` inline; the backoff uses `await asyncio.sleep(delay)`. Checked all 8 call
+     sites in `tools/secrets.py` (7) and `tools/folders.py` (1) — every one now `await`s the
+     call; none were missed.
+   - Re-ran `uv run pytest -q`: 21 passed, including the new
+     `test_call_with_retry_offloads_blocking_call_so_event_loop_stays_responsive`, which
+     asserts wall-clock overlap between a thread-blocking call and a concurrently-scheduled
+     coroutine — a real regression test for the exact failure mode Round 1 found, not just a
+     mocked/instant-call check. `uv run ruff check .` clean.
+   - Budget math (3 × 20s read timeout + 1s + 2s backoff ≈ 63s) is a reasonable worst case
+     for the documented failure mode (connection established, response stalls) and stays
+     under the 120s per-call invariant; not disputing it.
+
+### Suggestions (non-blocking, carried or new)
+
+1. [suggestion, carried from Round 1] `tools/secrets.py:24` — `MAX_RESULT_CHARS` is still an
+   unenforced dead constant. Left unaddressed again this round per the dev leg's note; still
+   non-blocking under REVIEW.md's dead-code rule.
+2. [suggestion, new] `docs/tickets/PRD-21235.md:211` — the Self-test row's literal scan
+   command, if run against the whole repo today, does produce output (inside
+   `docs/tickets/PRD-21235-review.md`, for the reason explained above), so "No output
+   (clean)" is only true for the deliverable, not for every file the documented command
+   would touch. Consider scoping the stated command to exclude `docs/tickets/*-review.md`
+   (e.g. `--exclude=*-review.md`) or adding a one-clause caveat, so a future reader re-running
+   the row's command literally doesn't get a false "still broken" signal from the review
+   record. Not blocking: the ambiguity is about the self-test row's wording, not about any
+   Chinese text in the shipped product.
+
+Gates verified independently on this commit (same worktree, not just re-reading the dev
+leg's report): `uv run pytest -q` → `21 passed`; `uv run ruff check .` → `All checks passed`;
+Chinese-text scan → only the review-record hits discussed above. `gitleaks` was not
+available in this review environment to re-run; relying on the dev leg's reported clean
+result for that one gate (working tree + 6-commit history). README connector section
+diffed byte-for-byte against `vendor-mcp-development/reference/readme-connector-section.md`
+— the file's common block matches exactly; everything after it is vendor-specific content
+the template doesn't cover, as expected.
